@@ -1,0 +1,16 @@
+# File: requirements.txt
+# Version: 1.3
+# Description: Requirements for CIFAR-10 Image Classifier project.
+# Usage: pip install -r requirements.txt
+
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
+matplotlib
+numpy
+jupyter
+jupyterlab
+ipykernel

@@ -1,0 +1,14 @@
+# README
+# - Usage: After activating the `seg` conda env (Python 3.13), run `pip install -r requirements.txt` to install the notebook and analysis dependencies for the Identify Customer Segments project.
+# - Version: 2025-12-04
+#
+jupyterlab>=4.2
+notebook>=7.2
+ipykernel>=6.29
+numpy>=2.1
+scipy>=1.13
+pandas>=2.2
+scikit-learn>=1.5
+matplotlib>=3.9
+seaborn>=0.13
+
