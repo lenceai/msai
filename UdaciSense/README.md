@@ -18,19 +18,21 @@ git clone https://github.com/udacity/cd14453-advanced-ml-opt.git
 cd cd14453-advanced-ml-opt/project/starter_kit
 ```
 
-2. The project requires the following major dependencies:
+2. Recommended (stable) environment for this project:
 
+- Python **3.11**
+- PyTorch **2.7.1**
+- TorchAO **0.12.0** (optional, for advanced quantization)
+
+Install dependencies:
+
+```sh
+# (Recommended) install PyTorch first (GPU example: CUDA 12.8)
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+
+# install remaining dependencies
+pip install -r requirements.txt
 ```
-pytorch>=1.12.0
-torchvision>=0.13.0
-numpy>=1.21.0
-pandas>=1.3.0
-matplotlib>=3.4.0
-```
-
-Which are all collected within the `requirements.txt` file.
-
-You can install for your environment by running `pip install -r requirements.txt`.
 
 
 3. Install the project as a local package (this makes internal modules accessible). From the `starter-kit` directory run the following command:
@@ -51,11 +53,11 @@ pip install -e .
 │
 ├── compression/
 │   ├── __init__.py
-│   ├── in-training/ - Compression techniques applied during training
+│   ├── in_training/ - Compression techniques applied during training
 │   │   ├── distillation.py
-│   │   ├── gradual_pruning.py
-│   │   └── quantization_aware.py
-│   └── post-training/ - Techniques applied to trained models
+│   │   ├── pruning.py
+│   │   └── quantization.py
+│   └── post_training/ - Techniques applied to trained models
 │       ├── graph_optimization.py
 │       ├── pruning.py
 │       └── quantization.py
@@ -74,7 +76,7 @@ pip install -e .
 │
 ├── .gitignore 
 ├── .README 
-├── requirements.txt - Packages required to run (and extend on) the project
+├── requirements.txt - Packages required to run the project
 ├── report.md - (Template for) your final report
 └── setup.py - Package setup file
 ```

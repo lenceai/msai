@@ -17,6 +17,40 @@ from tqdm import tqdm
 from typing import Dict, Any, List, Tuple, Optional, Union
 
 
+# ------ INTERNAL HELPERS ------ #
+
+def _is_int8_quantized_model(model: nn.Module) -> bool:
+    """Best-effort check for an *actually quantized* (INT8) eager model.
+
+    Why we need this:
+    - Quantized eager modules (torch.ao.nn.quantized / torch.nn.quantized) **do not** run on CUDA.
+    - Attempting to move them to CUDA can hard-crash the Python process (Jupyter kernel death),
+      which cannot be caught with try/except.
+    - QAT models (fake-quant) are *not* "actually quantized" and can still run on CUDA.
+    """
+    # TorchScript models: skip eager checks (handled elsewhere)
+    if isinstance(model, torch.jit.ScriptModule):
+        return False
+
+    quantized_prefixes = (
+        "torch.ao.nn.quantized",
+        "torch.nn.quantized",
+        "torch.ao.nn.intrinsic.quantized",
+        "torch.nn.intrinsic.quantized",
+    )
+
+    try:
+        for m in model.modules():
+            mod = getattr(m, "__module__", "")
+            if any(mod.startswith(p) for p in quantized_prefixes):
+                return True
+    except Exception:
+        # If introspection fails, be conservative and assume not quantized.
+        return False
+
+    return False
+
+
 # ------ ACCURACY EVALUATION FUNCTIONS ------ #
 
 def evaluate_accuracy(
@@ -26,47 +60,50 @@ def evaluate_accuracy(
     topk: Tuple[int, ...] = (1, 5)
 ) -> Dict[str, float]:
     """Evaluate model accuracy on a dataset.
-    
+
     Args:
         model: PyTorch model
         dataloader: DataLoader for evaluation data
         device: Device to run evaluation on
         topk: Tuple of k values for top-k accuracy
-        
+
     Returns:
         Dictionary of accuracy metrics
     """
     model.eval()
-    
+
+    # Quantized eager models must run on CPU
+    if _is_int8_quantized_model(model) and device.type != "cpu":
+        device = torch.device("cpu")
+
     model = model.to(device)
-    
+
     # Initialize counters
     corrects = {k: 0 for k in topk}
     total = 0
-    
+
     with torch.no_grad():
         for inputs, labels in tqdm(dataloader, desc="Evaluating accuracy"):
             inputs = inputs.to(device)
             labels = labels.to(device)
-            
-            # Forward pass
+
             outputs = model(inputs)
-            
+
             # Calculate top-k accuracy
             _, preds = outputs.topk(max(topk), 1, True, True)
             preds = preds.t()
             correct = preds.eq(labels.view(1, -1).expand_as(preds))
-            
+
             # Update counters
             batch_size = inputs.size(0)
             total += batch_size
-            
-            for i, k in enumerate(topk):
+
+            for k in topk:
                 corrects[k] += correct[:k].reshape(-1).float().sum(0).item()
-    
+
     # Calculate accuracy
     accuracy = {f'top{k}_acc': 100.0 * corrects[k] / total for k in topk}
-    
+
     return accuracy
 
 
@@ -90,6 +127,10 @@ def evaluate_per_class_accuracy(
         Dictionary of per-class accuracy percentages
     """
     model.eval()
+    if _is_int8_quantized_model(model) and device.type != "cpu":
+        device = torch.device("cpu")
+    model = model.to(device)
+
     class_correct = [0.0] * num_classes
     class_total = [0.0] * num_classes
     
@@ -171,7 +212,8 @@ def measure_inference_time(
     model: nn.Module,
     input_size: Tuple[int, ...] = (1, 3, 32, 32),
     num_warmup: int = 10,
-    num_runs: int = 100
+    num_runs: int = 100,
+    include_cuda: Optional[bool] = None
 ) -> Dict[str, Dict[str, float]]:
     """Measure model inference time on both CPU and CUDA (if available).
     
@@ -197,6 +239,14 @@ def measure_inference_time(
         }
     """
     results = {}
+
+    # Auto policy:
+    # - If include_cuda is not specified, use CUDA if available.
+    # - Never use CUDA for *actually quantized* eager models (can hard-crash kernel).
+    if include_cuda is None:
+        include_cuda = torch.cuda.is_available()
+    if _is_int8_quantized_model(model):
+        include_cuda = False
     
     # Test on CPU
     try:
@@ -233,7 +283,7 @@ def measure_inference_time(
         print("WARNING: Model does not support inference with cpu. Skipping latency evaluation for CPU.")
 
     # Test on CUDA if available
-    if torch.cuda.is_available():
+    if include_cuda and torch.cuda.is_available():
         try:
             cuda_device = torch.device('cuda')
             model_cuda = copy.deepcopy(model).to(cuda_device)
@@ -352,8 +402,8 @@ def measure_memory_usage(
     Returns:
         Dictionary of memory metrics (peak_memory_mb, allocated_memory_mb)
     """
-    # Only applicable for CUDA devices
-    if device.type != 'cuda':
+    # Only applicable for CUDA devices, and never for quantized eager models.
+    if device.type != 'cuda' or _is_int8_quantized_model(model):
         return {'peak_memory_mb': None, 'allocated_memory_mb': None}
     
     model.eval()
@@ -405,22 +455,27 @@ def evaluate_model_metrics(
     Returns:
         Dictionary of metrics including accuracy, timing, size, and memory usage
     """
+    # Quantized eager models must run on CPU. Enforce that centrally.
+    safe_device = device
+    if _is_int8_quantized_model(model) and safe_device.type != "cpu":
+        safe_device = torch.device("cpu")
+
     # Evaluate accuracy
-    accuracy_metrics = evaluate_accuracy(model, dataloader, device)
+    accuracy_metrics = evaluate_accuracy(model, dataloader, safe_device)
     
     # Evaluate per-class accuracy
     per_class_accuracy = evaluate_per_class_accuracy(
-        model, dataloader, device, num_classes, class_names
+        model, dataloader, safe_device, num_classes, class_names
     )
     
     # Measure inference time on both CPU and CUDA (if available)
-    timing_metrics = measure_inference_time(model, input_size)
+    timing_metrics = measure_inference_time(model, input_size, include_cuda=(safe_device.type == "cuda"))
     
     # Measure model size
     size_metrics = measure_model_size(model)
     
     # Measure memory usage (if CUDA)
-    memory_metrics = measure_memory_usage(model, input_size, device)
+    memory_metrics = measure_memory_usage(model, input_size, safe_device)
     
     # Compile all metrics
     metrics = {

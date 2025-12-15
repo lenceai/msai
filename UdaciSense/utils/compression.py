@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Tuple, Optional, Union, Callable
 
 from utils import MAX_ALLOWED_ACCURACY_DROP, TARGET_INFERENCE_SPEEDUP,TARGET_MODEL_COMPRESSION 
 from utils.evaluation import (evaluate_model_metrics, compare_models, 
-                             evaluate_requirements_met, calculate_confusion_matrix)
+                             evaluate_requirements_met, calculate_confusion_matrix, _is_int8_quantized_model)
 from utils.model import count_parameters, MobileNetV3_Household
 from utils.visualization import (plot_confusion_matrix, plot_training_history, 
                                 plot_weight_distribution, plot_model_comparison)
@@ -53,11 +53,16 @@ def evaluate_optimized_model(
     print(f"\nEvaluating performance of optimized model...")
     n_classes = len(class_names)
 
+    # Quantized eager models must run on CPU; prevent accidental CUDA evaluation (can crash kernel).
+    safe_device = device
+    if _is_int8_quantized_model(optimized_model) and safe_device.type != "cpu":
+        safe_device = torch.device("cpu")
+
     # Evaluate model metrics
     metrics = evaluate_model_metrics(
         optimized_model, 
         data_loader, 
-        device,
+        safe_device,
         n_classes,
         class_names,
         input_size,
@@ -66,7 +71,7 @@ def evaluate_optimized_model(
     
     # Calculate and save confusion matrix
     confusion_matrix = calculate_confusion_matrix(
-        optimized_model, data_loader, device, n_classes)
+        optimized_model, data_loader, safe_device, n_classes)
     _ = plot_confusion_matrix(
         confusion_matrix, class_names, f"../results/{technique_name}/confusion_matrix.png")
     
@@ -121,13 +126,18 @@ def compare_optimized_model_to_baseline(
         Dictionary with comparison results
     """
     print(f"\nComparing performance of optimized model against baseline...")
+
+    # If optimized model is quantized eager, force CPU for fair + safe comparison.
+    safe_device = device
+    if _is_int8_quantized_model(optimized_model) and safe_device.type != "cpu":
+        safe_device = torch.device("cpu")
     
     # Compare models
     comparison = compare_models(
         baseline_model=baseline_model,
         optimized_model=optimized_model,
         dataloader=data_loader,
-        device=device,
+        device=safe_device,
         num_classes=len(class_names),
         class_names=class_names,
         input_size=input_size

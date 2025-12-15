@@ -5,6 +5,9 @@
 # Using ** patterns to match recursively across all directories
 # ==============================================================================
 .env
+data/
+models/
+results/
 # ==============================================================================
 # DATA FILES - Large datasets should not be in version control
 # ==============================================================================

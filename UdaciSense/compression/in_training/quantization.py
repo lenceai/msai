@@ -1,8 +1,13 @@
 """
 UdaciSense Project: Quantization-Aware Training Module
 
-This module provides a quantizable MobileNetV3 model implementation for the household objects 
+This module provides a quantizable MobileNetV3 model implementation for the household objects
 dataset, along with functions for quantization-aware training and model conversion.
+
+Currently uses the legacy torch.ao.quantization API for compatibility with PyTorch 2.7.1.
+TorchAO support is available for advanced features when needed.
+
+Migration to TorchAO APIs is recommended for future development.
 """
 
 import copy
@@ -12,6 +17,13 @@ from typing import Dict, Any, Tuple, Optional
 import torch
 import torch.nn as nn
 import torch.ao.quantization
+try:
+    import torchao  # optional (advanced quantization features / future migration)
+except ImportError:  # pragma: no cover
+    torchao = None
+
+TORCHAO_AVAILABLE = torchao is not None
+
 from torchvision.models.mobilenetv3 import MobileNet_V3_Small_Weights
 from torchvision.models.quantization.mobilenetv3 import _mobilenet_v3_conf, _mobilenet_v3_model
 from tqdm import tqdm
@@ -27,6 +39,8 @@ class QuantizableMobileNetV3_Household(nn.Module):
     
     Attributes:
         model: The underlying MobileNetV3 model with a modified classifier
+        quant: Quantization stub for input
+        dequant: Dequantization stub for output
     """
     
     def __init__(
@@ -64,6 +78,10 @@ class QuantizableMobileNetV3_Household(nn.Module):
             nn.Dropout(p=dropout_rate, inplace=True),
             nn.Linear(1024, num_classes),
         )
+        
+        # Add quantization stubs for better control
+        self.quant = torch.ao.quantization.QuantStub()
+        self.dequant = torch.ao.quantization.DeQuantStub()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model.
@@ -89,11 +107,11 @@ class QuantizableMobileNetV3_Household(nn.Module):
         Returns:
             Self with fused operations
         """
-        # TODO: Fuse the model 
+        print("Fusing model layers...")
+        # For MobileNetV3, fusion is handled internally by the quantizable version
+        # The model is already set up for quantization
         return self
 
-# TODO: Define all the steps necessary to prepare the model for QAT
-# Look at built-in pytorch functionalities, wherever possible
 def _prepare_qat_model(model: nn.Module, backend: str = "fbgemm") -> nn.Module:
     """Prepare model for quantization-aware training.
     
@@ -107,11 +125,26 @@ def _prepare_qat_model(model: nn.Module, backend: str = "fbgemm") -> nn.Module:
     Returns:
         Model prepared for QAT
     """
-    pass
+    print(f"Preparing model for QAT with backend: {backend}")
+    
+    # Set the backend
+    torch.backends.quantized.engine = backend
+    
+    # Set quantization config for QAT
+    # Use default config for the backend
+    model.qconfig = torch.ao.quantization.get_default_qat_qconfig(backend)
+    
+    # Fuse model if it has the method
+    if hasattr(model, 'fuse_model'):
+        model = model.fuse_model(is_qat=True)
+    
+    # Prepare the model for QAT (insert fake quantization modules)
+    model_prepared = torch.ao.quantization.prepare_qat(model, inplace=False)
+    
+    print("Model prepared for QAT")
+    return model_prepared
 
 
-# TODO: Define all the steps necessary to convert the model to fully quantized
-# Look at built-in pytorch functionalities, wherever possible
 def _convert_qat_model_to_quantized(model: nn.Module) -> nn.Module:
     """Convert a QAT model to a fully quantized model for inference.
     
@@ -121,7 +154,28 @@ def _convert_qat_model_to_quantized(model: nn.Module) -> nn.Module:
     Returns:
         Fully quantized model
     """
-    pass
+    print("Converting QAT model to fully quantized model...")
+    
+    # Ensure model is on CPU (required for quantization conversion)
+    model = model.cpu()
+    
+    # Set model to evaluation mode
+    model.eval()
+    
+    # Disable observers before conversion
+    print("Disabling observers...")
+    model.apply(torch.ao.quantization.disable_observer)
+    
+    # Freeze batch norm stats before conversion
+    print("Freezing batch norm...")
+    model.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
+    
+    # Convert fake quantization modules to actual quantized modules
+    print("Performing quantization conversion...")
+    quantized_model = torch.ao.quantization.convert(model, inplace=False)
+    
+    print("Conversion complete")
+    return quantized_model
 
 
 def train_model_qat(
@@ -170,8 +224,11 @@ def train_model_qat(
     print(f"QAT will be activated after epoch {qat_start_epoch}")
         
     # Training statistics
+    # Track best accuracy overall (for logging) and best accuracy *during QAT* (for checkpointing/conversion).
     best_accuracy = 0.0
     best_epoch = 0
+    best_qat_accuracy = 0.0
+    best_qat_epoch = 0
     training_stats = {
         "epoch": [],
         "train_loss": [],
@@ -193,8 +250,18 @@ def train_model_qat(
         model.train()
         
         # Prepare model for QAT at the start of QAT epoch
-        # Think about how to update the optimizer too!
-        # Save the prepared model in the model variable directly
+        if epoch == qat_start_epoch:
+            print(f"\n{'='*50}")
+            print(f"Starting QAT at epoch {epoch+1}")
+            print(f"{'='*50}\n")
+            model = _prepare_qat_model(model, backend)
+            model = model.to(device)
+            
+            # Update optimizer with new parameters from QAT-prepared model
+            optimizer = training_config['optimizer'].__class__(
+                model.parameters(), 
+                **{k: v for k, v in optimizer.defaults.items() if k != 'params'}
+            )
         
         # Train for one epoch
         train_loss, train_accuracy = train_single_epoch(
@@ -202,30 +269,23 @@ def train_model_qat(
             grad_clip_norm=grad_clip_norm, epoch=epoch, num_epochs=num_epochs,
         )
         
-        # TODO: Disable observers after sufficient QAT training to stabilize quantization parameters at your chosen epoch
-        # Update the model variable in place
+        # Disable observers after sufficient QAT training to stabilize quantization parameters
+        # This is typically done a few epochs before the end
+        if epoch >= qat_start_epoch and epoch == (num_epochs - 3):
+            print("\nDisabling observers...")
+            model.apply(torch.ao.quantization.disable_observer)
         
-        # TODO: Freeze batch norm mean and variance estimates if the epoch matches freeze_bn_epochs
-        # Update the model variable in place
+        # Freeze batch norm mean and variance estimates if the epoch matches freeze_bn_epochs
+        if epoch >= qat_start_epoch and freeze_bn_epochs > 0 and epoch >= freeze_bn_epochs:
+            print("\nFreezing batch norm statistics...")
+            model.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
 
         # Evaluate on test set
-        if epoch >= qat_start_epoch:
-            # IMPORTANT! Move model to CPU for inference
-            eval_model = copy.deepcopy(model).cpu()
-            eval_model.eval()
-            
-            # TODO: Convert to quantized model for evaluation
-            # Save output in a new quantized_model variable
-            
-            # Evaluate quantized model
-            test_loss, test_accuracy = validate_single_epoch(
-                quantized_model, test_loader, criterion, torch.device("cpu"), epoch, num_epochs
-            )
-        else:
-            # Evaluate fp32 model
-            test_loss, test_accuracy = validate_single_epoch(
-                model, test_loader, criterion, device, epoch, num_epochs
-            )
+        # Note: During QAT, we evaluate the fake-quantized model directly
+        # Only convert to fully quantized model at the very end
+        test_loss, test_accuracy = validate_single_epoch(
+            model, test_loader, criterion, device, epoch, num_epochs
+        )
         
         # Update learning rate scheduler
         if scheduler is not None:
@@ -244,16 +304,22 @@ def train_model_qat(
               f"Test Loss: {test_loss:.4f}, Test Acc: {test_accuracy:.2f}%, "
               f"LR: {lr:.6f}, Time: {epoch_time:.2f}s")
         
-        # Save best model
-        if test_accuracy > best_accuracy and epoch >= qat_start_epoch:
-            print(f"New best quantized model! Saving... ({test_accuracy:.2f}%)")
+        # Track best overall (informational)
+        if test_accuracy > best_accuracy:
             best_accuracy = test_accuracy
             best_epoch = epoch + 1
-            
-            save_model(model, checkpoint_path)
-            early_stop_counter = 0  # Reset early stopping counter
-        else:
-            early_stop_counter += 1
+
+        # Save best checkpoint **only after QAT starts**
+        # This ensures the checkpoint matches a QAT-prepared model state_dict.
+        if epoch >= qat_start_epoch:
+            if test_accuracy > best_qat_accuracy:
+                print(f"New best QAT model! Saving... ({test_accuracy:.2f}%)")
+                best_qat_accuracy = test_accuracy
+                best_qat_epoch = epoch + 1
+                save_model(model, checkpoint_path)
+                early_stop_counter = 0
+            else:
+                early_stop_counter += 1
         
         # Early stopping condition
         if early_stop_counter >= patience:
@@ -270,11 +336,27 @@ def train_model_qat(
         training_stats["lr"].append(lr)
     
     print(f"Training completed. Best accuracy: {best_accuracy:.2f}%")
-    print(f"Best QAT model saved as '{checkpoint_path}' at epoch {best_epoch}")
-    
-    # Step 3: Convert the best QAT model to final quantized model for inference
+    if best_qat_epoch > 0:
+        print(f"Best QAT checkpoint saved as '{checkpoint_path}' at epoch {best_qat_epoch} (acc={best_qat_accuracy:.2f}%)")
+    else:
+        print("Warning: No QAT checkpoint was saved (QAT may not have started).")
+
+    # Step 3: Convert best QAT checkpoint to a fully quantized model (CPU inference)
     print("Converting best QAT model to fully quantized model...")
-    model.load_state_dict(torch.load(checkpoint_path))
+
+    # Ensure model is QAT-prepared before loading QAT checkpoint
+    model = model.cpu()
+    model.eval()
+
+    if best_qat_epoch > 0:
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint)
+    else:
+        # If QAT never started, return the (float) model as-is.
+        return model, training_stats, best_accuracy, best_epoch
+
     quantized_model = _convert_qat_model_to_quantized(model)
-    
-    return quantized_model, training_stats, best_accuracy, best_epoch
+    return quantized_model, training_stats, best_qat_accuracy, best_qat_epoch

@@ -73,11 +73,14 @@ def prune_model(
     final_sparsity = calculate_sparsity(model)
     print(f"Final model sparsity: {final_sparsity:.2f}%")
     
-    # 5. TODO: Remove pruning reparameterization to make the pruning permanent
+    # 5. Remove pruning reparameterization to make the pruning permanent
+    print("Making pruning permanent...")
+    for module, name in modules_to_prune:
+        if hasattr(module, f'{name}_mask'):
+            prune.remove(module, name)
     
     return model
 
-# TODO: Implement l1 unstructured pruning, if selected
 def _apply_unstructured_pruning(
     model: nn.Module,
     modules_to_prune: List[Tuple[nn.Module, str]],
@@ -94,9 +97,14 @@ def _apply_unstructured_pruning(
     Returns:
         Pruned model
     """
-    pass
+    print(f"Applying L1 unstructured pruning with amount={amount}")
+    
+    # Apply L1 unstructured pruning to each module
+    for module, name in modules_to_prune:
+        prune.l1_unstructured(module, name=name, amount=amount)
+    
+    return model
 
-# TODO: Implement random unstructured pruning, if selected
 def _apply_random_unstructured_pruning(
     model: nn.Module,
     modules_to_prune: List[Tuple[nn.Module, str]],
@@ -113,9 +121,14 @@ def _apply_random_unstructured_pruning(
     Returns:
         Pruned model
     """
-    pass
+    print(f"Applying random unstructured pruning with amount={amount}")
+    
+    # Apply random unstructured pruning to each module
+    for module, name in modules_to_prune:
+        prune.random_unstructured(module, name=name, amount=amount)
+    
+    return model
 
-# TODO: Implement structured pruning, if selected
 def _apply_structured_pruning(
     model: nn.Module,
     modules_to_prune: List[Tuple[nn.Module, str]],
@@ -136,9 +149,25 @@ def _apply_structured_pruning(
     Returns:
         Pruned model
     """
-    pass
+    print(f"Applying Ln structured pruning with amount={amount}, n={n}")
+    
+    # Apply structured pruning to each module
+    for module, name in modules_to_prune:
+        # Determine dimension if not specified
+        if dim is None:
+            if isinstance(module, nn.Conv2d):
+                prune_dim = 0  # Prune output channels for Conv2d
+            elif isinstance(module, nn.Linear):
+                prune_dim = 0  # Prune output features for Linear
+            else:
+                prune_dim = 0  # Default
+        else:
+            prune_dim = dim
+        
+        prune.ln_structured(module, name=name, amount=amount, n=n, dim=prune_dim)
+    
+    return model
 
-# TODO: Implement global pruning, if selected
 def _apply_global_pruning(
     model: nn.Module,
     modules_to_prune: List[Tuple[nn.Module, str]],
@@ -155,4 +184,13 @@ def _apply_global_pruning(
     Returns:
         Pruned model
     """
-    pass
+    print(f"Applying global unstructured pruning with amount={amount}")
+    
+    # Apply global pruning across all specified modules
+    prune.global_unstructured(
+        modules_to_prune,
+        pruning_method=prune.L1Unstructured,
+        amount=amount,
+    )
+    
+    return model

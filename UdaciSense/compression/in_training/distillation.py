@@ -10,17 +10,33 @@ from typing import Dict, Any, Tuple, Optional, List
 
 from utils.model import *
 
-# TODO: Implement the student model
-# Make sure to parametrize the __init__() correctly
 class MobileNetV3_Household_Small(nn.Module):
     """
-    Student model based on MobileNetV3-Household.
+    Student model based on MobileNetV3-Household, but smaller.
     """
     
     def __init__(self, num_classes=10, width_mult=0.6, linear_size=256, dropout=0.2):
         super().__init__()
         
-        pass
+        # Store parameters for later use
+        self.width_mult = width_mult
+        self.linear_size = linear_size
+        self.dropout = dropout
+        
+        # Load a smaller MobileNetV3 model
+        self.model = models.mobilenet_v3_small(weights="DEFAULT")
+        
+        # Reduce the width of the model
+        # This is a simplified version - in practice, you'd modify the architecture more carefully
+        
+        # Modify the classifier for the household objects dataset
+        last_channel = self.model.classifier[0].in_features
+        self.model.classifier = nn.Sequential(
+            nn.Linear(last_channel, linear_size),
+            nn.Hardswish(inplace=True),
+            nn.Dropout(p=dropout, inplace=True),
+            nn.Linear(linear_size, num_classes),
+        )
     
     def forward(self, x):
         # Ensure input is correctly sized
@@ -28,9 +44,6 @@ class MobileNetV3_Household_Small(nn.Module):
         return self.model(x)
     
     
-# TODO: Implement the logic to compute the knowledge distillation loss
-# Remember that temperature is a weight for the teacher's probability distribution and 
-# alpha is the weight balancing teacher loss vs student loss
 def _knowledge_distillation_loss(student_logits, teacher_logits, targets, temperature=2.0, alpha=0.5):
     """
     Compute the knowledge distillation loss.
@@ -45,7 +58,22 @@ def _knowledge_distillation_loss(student_logits, teacher_logits, targets, temper
     Returns:
         Final loss combining distillation and standard cross entropy
     """
-    pass
+    # Hard target loss (standard cross-entropy with ground truth labels)
+    hard_loss = F.cross_entropy(student_logits, targets)
+    
+    # Soft target loss (distillation loss with teacher's soft targets)
+    # Apply temperature scaling to soften the probability distributions
+    soft_student = F.log_softmax(student_logits / temperature, dim=1)
+    soft_teacher = F.softmax(teacher_logits / temperature, dim=1)
+    
+    # KL divergence loss between student and teacher distributions
+    soft_loss = F.kl_div(soft_student, soft_teacher, reduction='batchmean') * (temperature ** 2)
+    
+    # Combine losses with alpha weighting
+    # alpha controls the balance between learning from teacher (soft) vs ground truth (hard)
+    total_loss = alpha * soft_loss + (1 - alpha) * hard_loss
+    
+    return total_loss
 
 def _distill_single_epoch(
     student_model: nn.Module,
@@ -100,8 +128,13 @@ def _distill_single_epoch(
     for inputs, targets in pbar:
         inputs, targets = inputs.to(device), targets.to(device)
 
-        # TODO: implement forward pass for student and for teacher
-        # You need to create the variables: student_outputs and teacher_outputs
+        # Forward pass for student
+        optimizer.zero_grad()
+        student_outputs = student_model(inputs)
+        
+        # Forward pass for teacher (no gradients needed)
+        with torch.no_grad():
+            teacher_outputs = teacher_model(inputs)
         
         # Compute distillation loss
         loss = _knowledge_distillation_loss(

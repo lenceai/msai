@@ -54,8 +54,6 @@ def optimize_model(
     return optimized_model
 
 
-# TODO: Implement the graph optimization techniques of your choice
-# Use built-in torchscript functionalities
 def _optimize_with_torchscript(
     model: nn.Module,
     dummy_input: torch.Tensor,
@@ -76,11 +74,27 @@ def _optimize_with_torchscript(
     if custom_options is None:
         custom_options = {}
     
-    pass
+    optimize_for_mobile = custom_options.get('optimize_for_mobile', False)
+    
+    print("Tracing model with TorchScript...")
+    
+    # Trace the model with JIT
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        traced_model = torch.jit.trace(model, dummy_input)
+    
+    # Optimize for inference
+    print("Optimizing TorchScript model for inference...")
+    traced_model = torch.jit.optimize_for_inference(traced_model)
+    
+    # Freeze the model (constant propagation and other optimizations)
+    print("Freezing model...")
+    traced_model = torch.jit.freeze(traced_model)
+    
+    print("TorchScript optimization complete")
+    return traced_model
 
 
-# TODO: Implement the graph optimization techniques of your choice
-# Use built-in torch fx functionalities
 def _optimize_with_torch_fx(
     model: nn.Module,
     dummy_input: torch.Tensor,
@@ -102,7 +116,41 @@ def _optimize_with_torch_fx(
     if custom_options is None:
         custom_options = {}
     
-    pass
+    print("Tracing model with Torch FX...")
+    
+    # Symbolically trace the model
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            traced_model = fx.symbolic_trace(model)
+        except Exception as e:
+            print(f"Warning: Could not symbolically trace model: {e}")
+            print("Falling back to regular model...")
+            return model
+    
+    # Apply optimizations
+    print("Applying FX optimizations...")
+    
+    # Remove dropout layers (for inference)
+    try:
+        traced_model = remove_dropout(traced_model)
+    except Exception as e:
+        print(f"Could not remove dropout: {e}")
+    
+    # Fuse operations
+    try:
+        traced_model = fuse(traced_model)
+    except Exception as e:
+        print(f"Could not fuse operations: {e}")
+    
+    # Optimize for inference
+    try:
+        traced_model = optimize_for_inference(traced_model)
+    except Exception as e:
+        print(f"Could not optimize for inference: {e}")
+    
+    print("Torch FX optimization complete")
+    return traced_model
 
 
 def verify_model_equivalence(

@@ -1,26 +1,35 @@
-# Core packages
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.20.0
-matplotlib>=3.5.0
-seaborn>=0.11.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
-pillow>=9.0.0
+## UdaciSense Model Optimization - Requirements
+##
+## Recommended stack (stable for quantization / notebooks):
+## - Python: 3.11
+## - PyTorch: 2.7.1
+## - TorchAO: 0.12.0 (compatible with PyTorch 2.7.1)
+##
+## IMPORTANT (GPU installs):
+## Install PyTorch FIRST using the appropriate CUDA wheel index, then run:
+##   pip install -r requirements.txt
+##
+## Example (CUDA 12.8):
+##   pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+##
+## Finally, install this project in editable mode:
+##   pip install -e .
 
-# Jupyter for notebooks
+# ---- Core ----
+numpy>=1.26.0,<2.0.0
+pandas>=2.2.0
+tqdm>=4.66.0
+pillow>=10.2.0
+
+# ---- Visualization ----
+matplotlib>=3.9.0
+seaborn>=0.13.0
+
+# ---- Notebooks ----
 jupyter>=1.0.0
-ipywidgets>=7.6.0
+jupyterlab>=4.2.0
+ipykernel>=6.29.0
+ipywidgets>=8.1.0
 
-# For documentation
-markdown>=3.3.0
-
-# Utilities
-tqdm>=4.61.0
-thop>=0.0.31  # For calculating FLOPs (optional)
-
-# For plotting
-plotly>=5.0.0
-
-# Deep learning utilities
-tensorboard>=2.5.0  # For visualizing training (optional)
+# ---- Quantization / Optimization ----
+torchao==0.12.0
