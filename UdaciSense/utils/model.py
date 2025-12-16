@@ -99,12 +99,44 @@ def load_model(
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found: {path}")
 
+    # Normalize device to a torch.device (PyTorch APIs don't consistently accept plain strings).
+    try:
+        device_obj = torch.device(device) if isinstance(device, str) else device
+    except Exception:
+        device_obj = device
+
+    # Try loading as TorchScript model first (if .pt extension)
+    if path.endswith('.pt'):
+        try:
+            loaded = torch.jit.load(path, map_location=device_obj)
+            # TorchScript models are already loaded and ready to use
+            return loaded
+        except Exception:
+            # If torch.jit.load fails, fall through to regular torch.load
+            pass
+
     # Load checkpoint
-    loaded = torch.load(path, map_location=device)
+    try:
+        loaded = torch.load(path, map_location=device_obj)
+    except RuntimeError as e:
+        # PyTorch 2.6+ defaults torch.load(weights_only=True). This can raise on TorchScript archives
+        # (or other non-weights formats). Retry with weights_only=False when supported.
+        msg = str(e)
+        if "weights_only=True" in msg or "weights_only" in msg:
+            try:
+                loaded = torch.load(path, map_location=device_obj, weights_only=False)
+            except TypeError:
+                raise
+        else:
+            raise
+
+    # If it's a TorchScript model (ScriptModule), return it directly
+    if isinstance(loaded, torch.jit.ScriptModule):
+        return loaded
 
     # If it's a GraphModule, return it directly
     if hasattr(loaded, 'graph') and hasattr(loaded, '_modules'):
-        return loaded.to(device) if device else loaded
+        return loaded.to(device_obj) if device_obj else loaded
 
     # If it's a state_dict, load it into a new model instance
     if isinstance(loaded, dict) and 'state_dict' not in loaded:
@@ -114,7 +146,7 @@ def load_model(
 
         # Load weights
         model.load_state_dict(loaded)
-        return model.to(device)
+        return model.to(device_obj)
     
     raise ValueError("Unsupported checkpoint format.")
     
@@ -129,8 +161,11 @@ def save_model(model: nn.Module, path: str) -> None:
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
+    # Special handling for TorchScript models (must use torch.jit.save)
+    if isinstance(model, torch.jit.ScriptModule):
+        torch.jit.save(model, path)
     # Special handling for FX-optimized models
-    if hasattr(model, '_modules') and hasattr(model, 'graph'):
+    elif hasattr(model, '_modules') and hasattr(model, 'graph'):
         torch.save(model, path)
     else:
         torch.save(model.state_dict(), path)

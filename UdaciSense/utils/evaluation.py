@@ -51,6 +51,72 @@ def _is_int8_quantized_model(model: nn.Module) -> bool:
     return False
 
 
+def _ensure_model_runs_on_device(
+    model: nn.Module,
+    device: torch.device,
+    dataloader: Optional[DataLoader] = None,
+    input_size: Tuple[int, ...] = (1, 3, 32, 32),
+) -> Tuple[nn.Module, torch.device]:
+    """Best-effort: ensure model can run on the requested device; fall back to CPU if not.
+
+    Why we need this:
+    - Some TorchScript models (especially those produced from quantized/eager CPU flows)
+      may contain CPU-only ops (e.g. quantized kernels, mkldnn ops).
+    - Moving such a model (or running it) on CUDA will raise NotImplementedError at runtime.
+
+    Returns:
+        (possibly moved model, selected device)
+    """
+    # Quantized eager models must always run on CPU.
+    if _is_int8_quantized_model(model) and device.type != "cpu":
+        device = torch.device("cpu")
+
+    # For non-TorchScript models, a standard `.to(device)` is enough.
+    if not isinstance(model, torch.jit.ScriptModule):
+        try:
+            return model.to(device), device
+        except Exception:
+            return model.to(torch.device("cpu")), torch.device("cpu")
+
+    # TorchScript: probe whether it can run on the requested device.
+    probe_device = device
+    if probe_device.type == "cuda" and not torch.cuda.is_available():
+        probe_device = torch.device("cpu")
+
+    def _probe(m: nn.Module, d: torch.device) -> nn.Module:
+        # Some ScriptModules support `.to()`, others may be effectively fixed.
+        mm = m
+        try:
+            if hasattr(mm, "to"):
+                mm = mm.to(d)
+        except Exception:
+            # If .to() fails, we still try a forward (it will likely fail too).
+            mm = m
+
+        if dataloader is not None:
+            x, _ = next(iter(dataloader))
+            x = x[:1].to(d)
+        else:
+            x = torch.randn(input_size, device=d)
+
+        with torch.no_grad():
+            _ = mm(x)
+        return mm
+
+    # Try requested device first; if it fails, fall back to CPU.
+    try:
+        model = _probe(model, probe_device)
+        return model, probe_device
+    except Exception:
+        cpu = torch.device("cpu")
+        try:
+            model = _probe(model, cpu)
+        except Exception:
+            # If even CPU probe fails, return original model and CPU and let caller error.
+            return model, cpu
+        return model, cpu
+
+
 # ------ ACCURACY EVALUATION FUNCTIONS ------ #
 
 def evaluate_accuracy(
@@ -72,11 +138,8 @@ def evaluate_accuracy(
     """
     model.eval()
 
-    # Quantized eager models must run on CPU
-    if _is_int8_quantized_model(model) and device.type != "cpu":
-        device = torch.device("cpu")
-
-    model = model.to(device)
+    # Ensure model + device are compatible (TorchScript CPU-only graphs, quantized eager, etc.)
+    model, device = _ensure_model_runs_on_device(model, device, dataloader=dataloader)
 
     # Initialize counters
     corrects = {k: 0 for k in topk}
@@ -127,9 +190,7 @@ def evaluate_per_class_accuracy(
         Dictionary of per-class accuracy percentages
     """
     model.eval()
-    if _is_int8_quantized_model(model) and device.type != "cpu":
-        device = torch.device("cpu")
-    model = model.to(device)
+    model, device = _ensure_model_runs_on_device(model, device, dataloader=dataloader)
 
     class_correct = [0.0] * num_classes
     class_total = [0.0] * num_classes
@@ -188,6 +249,8 @@ def calculate_confusion_matrix(
         numpy.ndarray: Confusion matrix of shape [num_classes, num_classes]
     """
     model.eval()
+    # Ensure model and inputs end up on a compatible device (TorchScript CPU-only graphs, etc.)
+    model, device = _ensure_model_runs_on_device(model, device, dataloader=dataloader)
     confusion_matrix = np.zeros((num_classes, num_classes))
     
     with torch.no_grad():
@@ -405,6 +468,12 @@ def measure_memory_usage(
     # Only applicable for CUDA devices, and never for quantized eager models.
     if device.type != 'cuda' or _is_int8_quantized_model(model):
         return {'peak_memory_mb': None, 'allocated_memory_mb': None}
+
+    # TorchScript (or other) models may be effectively CPU-only (mkldnn/quantized ops).
+    # If it can't run on CUDA, fall back to "not applicable" rather than erroring.
+    model, device = _ensure_model_runs_on_device(model, device, input_size=input_size)
+    if device.type != "cuda":
+        return {'peak_memory_mb': None, 'allocated_memory_mb': None}
     
     model.eval()
     model = model.to(device)
@@ -459,6 +528,12 @@ def evaluate_model_metrics(
     safe_device = device
     if _is_int8_quantized_model(model) and safe_device.type != "cpu":
         safe_device = torch.device("cpu")
+
+    # TorchScript models can be CPU-only depending on how they were exported.
+    # Ensure the rest of the evaluation pipeline uses a compatible device.
+    model, safe_device = _ensure_model_runs_on_device(
+        model, safe_device, dataloader=dataloader, input_size=input_size
+    )
 
     # Evaluate accuracy
     accuracy_metrics = evaluate_accuracy(model, dataloader, safe_device)
@@ -595,13 +670,11 @@ def compare_models(
         baseline_metrics['accuracy']['top1_acc']
     ) / 100.0  # Convert from percentage to fraction
     
-    # Memory usage improvements (if CUDA)
-    if (baseline_metrics['memory']['peak_memory_mb'] is not None and 
-            baseline_metrics['memory']['peak_memory_mb'] > 0):
-        improvements['memory_reduction'] = 1.0 - (
-            optimized_metrics['memory']['peak_memory_mb'] / 
-            baseline_metrics['memory']['peak_memory_mb']
-        )
+    # Memory usage improvements (CUDA-only; may be unavailable for CPU-only / quantized / some TorchScript models)
+    base_peak = baseline_metrics.get('memory', {}).get('peak_memory_mb')
+    opt_peak = optimized_metrics.get('memory', {}).get('peak_memory_mb')
+    if base_peak is not None and base_peak > 0 and opt_peak is not None:
+        improvements['memory_reduction'] = 1.0 - (opt_peak / base_peak)
     else:
         improvements['memory_reduction'] = None
     

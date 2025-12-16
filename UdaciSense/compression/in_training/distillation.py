@@ -42,6 +42,128 @@ class MobileNetV3_Household_Small(nn.Module):
         # Ensure input is correctly sized
         x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
         return self.model(x)
+
+
+class MobileNetV3_Household_Tiny(nn.Module):
+    """
+    Ultra-small student model for maximum speed improvement.
+    Uses a genuinely smaller architecture with reduced width and fewer layers.
+    Target: 50%+ speed improvement with <5% accuracy drop.
+    
+    Architecture: Custom lightweight CNN with depthwise separable convolutions.
+    - Uses smaller input resolution (128x128 instead of 224x224)
+    - Fewer layers and channels than MobileNetV3-Small
+    - ~100-200K parameters (vs 1.5M in baseline)
+    """
+    
+    def __init__(self, num_classes=10, width_mult=0.5, linear_size=128, dropout=0.1):
+        super().__init__()
+        
+        # Store parameters for later use
+        self.width_mult = width_mult
+        self.linear_size = linear_size
+        self.dropout = dropout
+        
+        # Scale channels by width_mult for flexibility
+        c1 = int(32 * width_mult)   # ~16
+        c2 = int(48 * width_mult)   # ~24
+        c3 = int(96 * width_mult)   # ~48
+        c4 = int(128 * width_mult)  # ~64
+        c5 = int(256 * width_mult)  # ~128
+        
+        # Build a genuinely small CNN architecture
+        # Using depthwise separable convolutions like MobileNet but much smaller
+        self.features = nn.Sequential(
+            # Initial conv - small number of channels
+            nn.Conv2d(3, c1, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(c1),
+            nn.Hardswish(inplace=True),
+            
+            # Depthwise separable block 1
+            nn.Conv2d(c1, c1, kernel_size=3, stride=1, padding=1, groups=c1, bias=False),
+            nn.BatchNorm2d(c1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c1, c2, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c2),
+            
+            # Depthwise separable block 2 with stride
+            nn.Conv2d(c2, c2, kernel_size=3, stride=2, padding=1, groups=c2, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, c3, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c3),
+            
+            # Depthwise separable block 3
+            nn.Conv2d(c3, c3, kernel_size=3, stride=1, padding=1, groups=c3, bias=False),
+            nn.BatchNorm2d(c3),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c3, c3, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c3),
+            
+            # Depthwise separable block 4 with stride
+            nn.Conv2d(c3, c3, kernel_size=3, stride=2, padding=1, groups=c3, bias=False),
+            nn.BatchNorm2d(c3),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c3, c4, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c4),
+            
+            # Depthwise separable block 5
+            nn.Conv2d(c4, c4, kernel_size=3, stride=1, padding=1, groups=c4, bias=False),
+            nn.BatchNorm2d(c4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c4, c4, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c4),
+            
+            # Depthwise separable block 6 with stride
+            nn.Conv2d(c4, c4, kernel_size=3, stride=2, padding=1, groups=c4, bias=False),
+            nn.BatchNorm2d(c4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c4, c5, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(c5),
+            nn.Hardswish(inplace=True),
+        )
+        
+        # Adaptive pooling to get consistent output size
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        
+        # Classifier with moderate capacity
+        self.classifier = nn.Sequential(
+            nn.Linear(c5, linear_size),
+            nn.Hardswish(inplace=True),
+            nn.Dropout(p=dropout, inplace=True),
+            nn.Linear(linear_size, num_classes),
+        )
+        
+        # Initialize weights
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x):
+        # Resize input to smaller size for faster processing (128x128 instead of 224x224)
+        # This is key for achieving 50%+ speed improvement
+        x = F.interpolate(x, size=(128, 128), mode='bilinear', align_corners=False)
+        
+        # Feature extraction
+        x = self.features(x)
+        
+        # Pooling
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        
+        # Classification
+        x = self.classifier(x)
+        return x
     
     
 def _knowledge_distillation_loss(student_logits, teacher_logits, targets, temperature=2.0, alpha=0.5):
@@ -307,8 +429,24 @@ def train_with_distillation(
         training_stats["epoch_time"].append(epoch_time)
         training_stats["lr"].append(lr)
     
-    # Load the best student model
-    student_model = load_model(checkpoint_path, device, model_class=MobileNetV3_Household_Small, width_mult=student_model.width_mult, linear_size=student_model.linear_size, dropout=student_model.dropout)
+    # Load the best student model - detect model type by class
+    model_class = type(student_model)
+    if model_class == MobileNetV3_Household_Tiny:
+        student_model = load_model(
+            checkpoint_path, device, 
+            model_class=MobileNetV3_Household_Tiny, 
+            width_mult=student_model.width_mult, 
+            linear_size=student_model.linear_size, 
+            dropout=student_model.dropout
+        )
+    else:
+        student_model = load_model(
+            checkpoint_path, device, 
+            model_class=MobileNetV3_Household_Small, 
+            width_mult=student_model.width_mult, 
+            linear_size=student_model.linear_size, 
+            dropout=student_model.dropout
+        )
     
     print(f"Distillation completed. Best student accuracy: {best_accuracy:.2f}%")
     print(f"Best student model saved as '{checkpoint_path}' at epoch {best_epoch}")
